@@ -112,7 +112,7 @@ Resources:
     Properties:
       ImageId: "ami-0ec10929233384c7f"
       InstanceType: t3.micro
-      KeyName: "anomaly-key"
+      KeyName: "ds5220-anomaly-key"
       IamInstanceProfile: !Ref EC2InstanceProfile
       SecurityGroups:
         - !Ref SecurityGroup
