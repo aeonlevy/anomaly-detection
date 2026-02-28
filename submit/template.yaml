@@ -1,0 +1,176 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: DS5220 Anomaly Detection Stack
+
+Parameters:
+  YourIP:
+    Type: String
+    Default: "96.231.241.237/32"
+
+  GitHubRepo:
+    Type: String
+    Default: "https://github.com/aeonlevy/anomaly-detection.git"
+
+Resources:
+
+  # ── S3 Bucket ──────────────────────────────────────────────────────────────
+  AnomalyBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: "anomaly-detection-695210052602"
+      NotificationConfiguration:
+        TopicConfigurations:
+          - Event: "s3:ObjectCreated:*"
+            Filter:
+              S3Key:
+                Rules:
+                  - Name: prefix
+                    Value: "raw/"
+                  - Name: suffix
+                    Value: ".csv"
+            Topic: !Ref SNSTopic
+
+  # ── SNS Topic ───────────────────────────────────────────────────────────────
+  SNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: ds5220-dp1
+
+  SNSTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics:
+        - !Ref SNSTopic
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref SNSTopic
+            Condition:
+              ArnLike:
+                aws:SourceArn: "arn:aws:s3:::anomaly-detection-695210052602"
+
+  SNSSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref SNSTopic
+      Protocol: http
+      Endpoint: !Sub "http://${ElasticIP}:8000/notify"
+
+  # ── IAM Role ────────────────────────────────────────────────────────────────
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3BucketAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - "arn:aws:s3:::anomaly-detection-695210052602"
+                  - "arn:aws:s3:::anomaly-detection-695210052602/*"
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  # ── Security Group ──────────────────────────────────────────────────────────
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Anomaly Detection SG
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref YourIP
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          CidrIp: "0.0.0.0/0"
+
+  # ── EC2 Instance ────────────────────────────────────────────────────────────
+  EC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: "ami-0ec10929233384c7f"
+      InstanceType: t3.micro
+      KeyName: "anomaly-key"
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroups:
+        - !Ref SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 16
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+
+          # Set bucket name for this session AND all future logins
+          export BUCKET_NAME="anomaly-detection-695210052602"
+          echo "BUCKET_NAME=anomaly-detection-695210052602" >> /etc/environment
+
+          # Install system dependencies
+          apt-get update -y
+          apt-get install -y git python3 python3-pip python3-venv
+
+          # Clone your forked repo
+          git clone https://github.com/aeonlevy/anomaly-detection.git /opt/anomaly-detection
+          cd /opt/anomaly-detection
+
+          # Create virtual environment and install dependencies
+          python3 -m venv /opt/anomaly-detection/venv
+          /opt/anomaly-detection/venv/bin/pip install --upgrade pip
+          /opt/anomaly-detection/venv/bin/pip install -r /opt/anomaly-detection/requirements.txt
+
+          # Create the log file so app.py can write to it immediately
+          touch /opt/anomaly-detection/app.log
+
+          # Start FastAPI in the background
+          nohup /opt/anomaly-detection/venv/bin/fastapi run \
+            /opt/anomaly-detection/app.py \
+            --host 0.0.0.0 \
+            --port 8000 \
+            >> /opt/anomaly-detection/startup.log 2>&1 &
+
+  # ── Elastic IP ──────────────────────────────────────────────────────────────
+  ElasticIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      InstanceId: !Ref EC2Instance
+
+Outputs:
+  PublicIP:
+    Value: !Ref ElasticIP
+    Description: Your EC2 public IP address
+
+  BucketName:
+    Value: !Ref AnomalyBucket
+    Description: Your S3 bucket name
+
+  SNSTopicArn:
+    Value: !Ref SNSTopic
+    Description: Your SNS topic ARN
+
+  APIEndpoint:
+    Value: !Sub "http://${ElasticIP}:8000"
+    Description: Your FastAPI base URL
